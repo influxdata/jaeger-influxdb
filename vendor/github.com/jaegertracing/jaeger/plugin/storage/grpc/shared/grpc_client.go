@@ -20,6 +20,7 @@ import (
 	"io"
 	"time"
 
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 
@@ -29,11 +30,37 @@ import (
 	"github.com/jaegertracing/jaeger/storage/spanstore"
 )
 
+var (
+	_ StoragePlugin        = (*grpcClient)(nil)
+	_ ArchiveStoragePlugin = (*grpcClient)(nil)
+	_ PluginCapabilities   = (*grpcClient)(nil)
+
+	// upgradeContext composites several steps of upgrading context
+	upgradeContext = composeContextUpgradeFuncs(upgradeContextWithBearerToken)
+)
+
 // grpcClient implements shared.StoragePlugin and reads/writes spans and dependencies
 type grpcClient struct {
-	readerClient     storage_v1.SpanReaderPluginClient
-	writerClient     storage_v1.SpanWriterPluginClient
-	depsReaderClient storage_v1.DependenciesReaderPluginClient
+	readerClient        storage_v1.SpanReaderPluginClient
+	writerClient        storage_v1.SpanWriterPluginClient
+	archiveReaderClient storage_v1.ArchiveSpanReaderPluginClient
+	archiveWriterClient storage_v1.ArchiveSpanWriterPluginClient
+	capabilitiesClient  storage_v1.PluginCapabilitiesClient
+	depsReaderClient    storage_v1.DependenciesReaderPluginClient
+}
+
+// ContextUpgradeFunc is a functional type that can be composed to upgrade context
+type ContextUpgradeFunc func(ctx context.Context) context.Context
+
+// composeContextUpgradeFuncs composes ContextUpgradeFunc and returns a composed function
+// to run the given func in strict order.
+func composeContextUpgradeFuncs(funcs ...ContextUpgradeFunc) ContextUpgradeFunc {
+	return func(ctx context.Context) context.Context {
+		for _, fun := range funcs {
+			ctx = fun(ctx)
+		}
+		return ctx
+	}
 }
 
 // upgradeContextWithBearerToken turns the context into a gRPC outgoing context with bearer token
@@ -42,10 +69,12 @@ type grpcClient struct {
 func upgradeContextWithBearerToken(ctx context.Context) context.Context {
 	bearerToken, hasToken := spanstore.GetBearerToken(ctx)
 	if hasToken {
-		requestMetadata := metadata.New(map[string]string{
-			spanstore.BearerTokenKey: bearerToken,
-		})
-		return metadata.NewOutgoingContext(ctx, requestMetadata)
+		md, ok := metadata.FromOutgoingContext(ctx)
+		if !ok {
+			md = metadata.New(nil)
+		}
+		md.Set(spanstore.BearerTokenKey, bearerToken)
+		return metadata.NewOutgoingContext(ctx, md)
 	}
 	return ctx
 }
@@ -65,37 +94,32 @@ func (c *grpcClient) SpanWriter() spanstore.Writer {
 	return c
 }
 
+func (c *grpcClient) ArchiveSpanReader() spanstore.Reader {
+	return &archiveReader{client: c.archiveReaderClient}
+}
+
+func (c *grpcClient) ArchiveSpanWriter() spanstore.Writer {
+	return &archiveWriter{client: c.archiveWriterClient}
+}
+
 // GetTrace takes a traceID and returns a Trace associated with that traceID
 func (c *grpcClient) GetTrace(ctx context.Context, traceID model.TraceID) (*model.Trace, error) {
-	stream, err := c.readerClient.GetTrace(upgradeContextWithBearerToken(ctx), &storage_v1.GetTraceRequest{
+	stream, err := c.readerClient.GetTrace(upgradeContext(ctx), &storage_v1.GetTraceRequest{
 		TraceID: traceID,
 	})
+	if status.Code(err) == codes.NotFound {
+		return nil, spanstore.ErrTraceNotFound
+	}
 	if err != nil {
 		return nil, fmt.Errorf("plugin error: %w", err)
 	}
 
-	trace := model.Trace{}
-	for received, err := stream.Recv(); err != io.EOF; received, err = stream.Recv() {
-		if err != nil {
-			if e, ok := status.FromError(err); !ok {
-				if e.Message() == spanstore.ErrTraceNotFound.Error() {
-					return nil, spanstore.ErrTraceNotFound
-				}
-			}
-			return nil, fmt.Errorf("grpc stream error: %w", err)
-		}
-
-		for i := range received.Spans {
-			trace.Spans = append(trace.Spans, &received.Spans[i])
-		}
-	}
-
-	return &trace, nil
+	return readTrace(stream)
 }
 
 // GetServices returns a list of all known services
 func (c *grpcClient) GetServices(ctx context.Context) ([]string, error) {
-	resp, err := c.readerClient.GetServices(upgradeContextWithBearerToken(ctx), &storage_v1.GetServicesRequest{})
+	resp, err := c.readerClient.GetServices(upgradeContext(ctx), &storage_v1.GetServicesRequest{})
 	if err != nil {
 		return nil, fmt.Errorf("plugin error: %w", err)
 	}
@@ -108,7 +132,7 @@ func (c *grpcClient) GetOperations(
 	ctx context.Context,
 	query spanstore.OperationQueryParameters,
 ) ([]spanstore.Operation, error) {
-	resp, err := c.readerClient.GetOperations(upgradeContextWithBearerToken(ctx), &storage_v1.GetOperationsRequest{
+	resp, err := c.readerClient.GetOperations(upgradeContext(ctx), &storage_v1.GetOperationsRequest{
 		Service:  query.ServiceName,
 		SpanKind: query.SpanKind,
 	})
@@ -136,7 +160,7 @@ func (c *grpcClient) GetOperations(
 
 // FindTraces retrieves traces that match the traceQuery
 func (c *grpcClient) FindTraces(ctx context.Context, query *spanstore.TraceQueryParameters) ([]*model.Trace, error) {
-	stream, err := c.readerClient.FindTraces(upgradeContextWithBearerToken(ctx), &storage_v1.FindTracesRequest{
+	stream, err := c.readerClient.FindTraces(upgradeContext(ctx), &storage_v1.FindTracesRequest{
 		Query: &storage_v1.TraceQueryParameters{
 			ServiceName:   query.ServiceName,
 			OperationName: query.OperationName,
@@ -174,7 +198,7 @@ func (c *grpcClient) FindTraces(ctx context.Context, query *spanstore.TraceQuery
 
 // FindTraceIDs retrieves traceIDs that match the traceQuery
 func (c *grpcClient) FindTraceIDs(ctx context.Context, query *spanstore.TraceQueryParameters) ([]model.TraceID, error) {
-	resp, err := c.readerClient.FindTraceIDs(upgradeContextWithBearerToken(ctx), &storage_v1.FindTraceIDsRequest{
+	resp, err := c.readerClient.FindTraceIDs(upgradeContext(ctx), &storage_v1.FindTraceIDsRequest{
 		Query: &storage_v1.TraceQueryParameters{
 			ServiceName:   query.ServiceName,
 			OperationName: query.OperationName,
@@ -194,8 +218,8 @@ func (c *grpcClient) FindTraceIDs(ctx context.Context, query *spanstore.TraceQue
 }
 
 // WriteSpan saves the span
-func (c *grpcClient) WriteSpan(span *model.Span) error {
-	_, err := c.writerClient.WriteSpan(context.Background(), &storage_v1.WriteSpanRequest{
+func (c *grpcClient) WriteSpan(ctx context.Context, span *model.Span) error {
+	_, err := c.writerClient.WriteSpan(ctx, &storage_v1.WriteSpanRequest{
 		Span: span,
 	})
 	if err != nil {
@@ -206,8 +230,8 @@ func (c *grpcClient) WriteSpan(span *model.Span) error {
 }
 
 // GetDependencies returns all interservice dependencies
-func (c *grpcClient) GetDependencies(endTs time.Time, lookback time.Duration) ([]model.DependencyLink, error) {
-	resp, err := c.depsReaderClient.GetDependencies(context.Background(), &storage_v1.GetDependenciesRequest{
+func (c *grpcClient) GetDependencies(ctx context.Context, endTs time.Time, lookback time.Duration) ([]model.DependencyLink, error) {
+	resp, err := c.depsReaderClient.GetDependencies(ctx, &storage_v1.GetDependenciesRequest{
 		EndTime:   endTs,
 		StartTime: endTs.Add(-lookback),
 	})
@@ -216,4 +240,39 @@ func (c *grpcClient) GetDependencies(endTs time.Time, lookback time.Duration) ([
 	}
 
 	return resp.Dependencies, nil
+}
+
+func (c *grpcClient) Capabilities() (*Capabilities, error) {
+	capabilities, err := c.capabilitiesClient.Capabilities(context.Background(), &storage_v1.CapabilitiesRequest{})
+	if status.Code(err) == codes.Unimplemented {
+		return &Capabilities{}, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("plugin error: %w", err)
+	}
+
+	return &Capabilities{
+		ArchiveSpanReader: capabilities.ArchiveSpanReader,
+		ArchiveSpanWriter: capabilities.ArchiveSpanWriter,
+	}, nil
+}
+
+func readTrace(stream storage_v1.SpanReaderPlugin_GetTraceClient) (*model.Trace, error) {
+	trace := model.Trace{}
+	for received, err := stream.Recv(); err != io.EOF; received, err = stream.Recv() {
+		if err != nil {
+			if s, _ := status.FromError(err); s != nil {
+				if s.Message() == spanstore.ErrTraceNotFound.Error() {
+					return nil, spanstore.ErrTraceNotFound
+				}
+			}
+			return nil, fmt.Errorf("grpc stream error: %w", err)
+		}
+
+		for i := range received.Spans {
+			trace.Spans = append(trace.Spans, &received.Spans[i])
+		}
+	}
+
+	return &trace, nil
 }

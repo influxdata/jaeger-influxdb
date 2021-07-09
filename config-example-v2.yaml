@@ -1,4 +1,4 @@
-influxdb.host: http://localhost:9999
+influxdb.host: http://localhost:8086
 influxdb.organization: my-org
-influxdb.bucket: my-bucket
+influxdb.bucket: my-bucker
 influxdb.token: my-token
