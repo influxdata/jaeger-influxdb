@@ -50,16 +50,17 @@ func main() {
 		logger.Warn(env)
 	}
 
-	var store shared.StoragePlugin
+	var store shared.PluginServices
 	var closeStore func() error
 	var err error
 
 	if conf.Database != "" {
 		logger.Warn("Started with InfluxDB v1")
-		store, closeStore, err = storev1.NewStore(&conf, logger)
+
+		store.Store, closeStore, err = storev1.NewStore(&conf, logger)
 	} else if conf.Organization != "" && conf.Bucket != "" && conf.Token != "" {
 		logger.Warn("Started with InfluxDB v2")
-		store, closeStore, err = storev2.NewStore(&conf, logger)
+		store.Store, closeStore, err = storev2.NewStore(&conf, logger)
 	} else {
 		err = errors.New("missing flags; for InfluxDB V1 set database and retention policy; for InfluxDB V2 set organization, bucket and token")
 	}
@@ -69,7 +70,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	grpc.Serve(store)
+	grpc.Serve(&store)
 
 	if err = closeStore(); err != nil {
 		logger.Error("failed to close store", "error", err)

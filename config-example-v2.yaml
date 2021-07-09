@@ -1,4 +1,4 @@
-influxdb.host: http://localhost:9999
-influxdb.organization: my-org
-influxdb.bucket: my-bucket
-influxdb.token: my-token
+influxdb.host: http://localhost:8086
+influxdb.organization: pavol
+influxdb.bucket: pavol
+influxdb.token: xUIQP3YexuMfyd-IFKzj1mu6-cm3K6wCQUnU4aPVIgGOFwyzuRNvWOpSURhdYeMS_-7cFoa_IrR0bT4ZfLzScg==

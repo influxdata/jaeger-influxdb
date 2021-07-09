@@ -223,8 +223,8 @@ func (r *Reader) FindTraceIDs(ctx context.Context, query *spanstore.TraceQueryPa
 const getDependenciesQueryInfluxQL = `select "span_id", "service_name", "references", "duration" from %s where time > now() - %s`
 
 // GetDependencies returns all inter-service dependencies
-func (r *Reader) GetDependencies(endTs time.Time, lookback time.Duration) ([]model.DependencyLink, error) {
-	response, err := r.query(context.Background(), fmt.Sprintf(getDependenciesQueryInfluxQL, r.spanMeasurement, lookback.String()))
+func (r *Reader) GetDependencies(ctx context.Context, endTs time.Time, lookback time.Duration) ([]model.DependencyLink, error) {
+	response, err := r.query(ctx, fmt.Sprintf(getDependenciesQueryInfluxQL, r.spanMeasurement, lookback.String()))
 	if err != nil {
 		return nil, err
 	}

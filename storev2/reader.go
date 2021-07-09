@@ -218,10 +218,10 @@ from(bucket: "%%s")
 `, "span_id", "references", "span_id", "references", "service_name")
 
 // GetDependencies returns all inter-service dependencies
-func (r *Reader) GetDependencies(endTs time.Time, lookback time.Duration) ([]model.DependencyLink, error) {
+func (r *Reader) GetDependencies(ctx context.Context, endTs time.Time, lookback time.Duration) ([]model.DependencyLink, error) {
 	r.logger.Warn("GetDependencies called")
 
-	resultIterator, err := r.query(context.TODO(),
+	resultIterator, err := r.query(ctx,
 		fmt.Sprintf(getDependenciesQueryFlux,
 			r.bucket, endTs.Add(-1*lookback).UTC().Format(time.RFC3339Nano), endTs.UTC().Format(time.RFC3339Nano), r.spanMeasurement))
 	if err != nil {

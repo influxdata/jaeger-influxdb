@@ -69,7 +69,7 @@ func (w *Writer) Close() error {
 }
 
 // WriteSpan saves the span into Cassandra
-func (w *Writer) WriteSpan(span *model.Span) error {
+func (w *Writer) WriteSpan(_ context.Context, span *model.Span) error {
 	points, err := dbmodel.SpanToPointsV2(span, w.spanMeasurement, w.logMeasurement, w.logger)
 	if err != nil {
 		return err
